@@ -8,37 +8,66 @@
 #include <atomic>
 #include <condition_variable>
 
-std::mutex mtx;        // Mutex para sincronização geral
-bool running = true;   // Controle do loop principal
-bool gameOver = false; // Estado do jogo (ativo ou encerrado)
+// **Constantes e Configurações**
+const int width = 100;
+const int height = 40;
+const int MAX_DEPOT_MISSILES = 10;
+const auto HELICOPTER_RELOAD_TIME = std::chrono::seconds(1);
 
-// Mutex e variáveis de condição para o depósito
-std::mutex depotMutex;
-std::condition_variable depotNotFull;
-std::condition_variable depotNotEmpty;
-bool truckUnloading = false;
-bool helicopterReloading = false;
-
-// Estrutura para o dinossauro
+// **Estruturas**
 struct Dino
 {
-    int x, y;         // Posição do dinossauro
-    bool alive;       // Estado do dinossauro (vivo ou morto)
+    int x, y;         // Posição
+    bool alive;       // Vivo ou morto
+    bool movingRight; // Direção do movimento
+    int headshotHits; // Contador de tiros na cabeça
+};
+
+struct Missile
+{
+    int x, y;         // Posição
+    bool active;      // Indica se o míssil está ativo
     bool movingRight; // Direção do movimento
 };
 
-// Estrutura para os mísseis
-struct Missile
-{
-    int x, y;         // Posição do míssil
-    bool active;      // Indica se o míssil ainda está ativo
-    bool movingRight; // Direção do míssil (direita ou esquerda)
-};
+// **Variáveis Globais**
+std::mutex mtx;        // Mutex para sincronização geral
+std::mutex depotMutex; // Mutex para o depósito
+std::condition_variable depotNotFull;
+std::condition_variable depotNotEmpty;
 
-std::vector<std::thread> missileThreads; // Armazenar threads dos mísseis
+bool running = true;   // Controle do loop principal
+bool gameOver = false; // Estado do jogo
+bool truckUnloading = false;
+bool helicopterReloading = false;
+
+std::atomic<int> depotMissiles{MAX_DEPOT_MISSILES};
+int MAX_HELICOPTER_MISSILES = 10; // Ajustado com base na dificuldade
+std::atomic<int> helicopterMissiles;
+int m = 1;  // Número de tiros na cabeça para matar o dinossauro
+int n = 10; // Capacidade de mísseis do helicóptero
+int t = 5;  // Tempo para gerar um novo dinossauro
+
+// **Objetos do Jogo**
+std::vector<std::thread> missileThreads; // Threads dos mísseis
 std::vector<Dino> dinos;                 // Lista de dinossauros
 
-// Representação do dinossauro
+// **Variáveis do Helicóptero**
+int helicopterX = 40, helicopterY = 20;
+bool helicopterMovingRight = true;
+
+enum class HelicopterState
+{
+    Normal,
+    Reloading
+};
+HelicopterState helicopterState = HelicopterState::Normal;
+std::chrono::time_point<std::chrono::steady_clock> reloadStartTime;
+
+// **Posição do Depósito**
+int depositX = 0, depositY = 10;
+
+// **Representações Gráficas**
 const char *dinoForm[6] = {
     "              __",
     "             / _)",
@@ -55,8 +84,7 @@ const char *dinoReversed[6] = {
     "  | )  | )  |_   ",
     " |_|--|_|-.__\\ "};
 
-// Representação do caminhão
-const char *truckRight[6] = {
+const char *truckRight[5] = {
     "     __             ",
     "   _|__| ___      ",
     " _||_|_||___\\___  ",
@@ -69,30 +97,30 @@ const char *truckLeft[5] = {
     ".-' _  ~ | _    |",
     " -(_)----(_)---'"};
 
-int truckWidth = 30; // Largura do caminhão
+// **Protótipos das Funções**
+void drawSkyAndGrass(int width, int height);
+void drawDino(const Dino &dino);
+void eraseDino(const Dino &dino);
+void drawHelicopter(int x, int y, bool movingRight);
+void eraseHelicopter(int x, int y);
+void drawMissile(Missile &missile);
+void eraseMissile(Missile &missile);
+void drawTruck(int x, int y, bool movingRight);
+void eraseTruck(int x, int y);
+void drawDeposit(int x, int y);
+bool isHelicopterAtDepot();
+void unloadMissilesToDepot(int amount);
+void truckAnimation();
+bool checkCollisionWithDinoHead(const Missile &missile, Dino &dino);
+bool checkCollisionWithDinoBody(const Missile &missile, const Dino &dino);
+bool checkCollisionWithHelicopter(const Dino &dino);
+void missileThread(Missile missile);
+int countAliveDinos();
+void dinoAnimation();
+void spawnDino();
+void showDifficultyMenu(int &m, int &n, int &t);
 
-// Variáveis para o helicóptero
-int helicopterX = 40, helicopterY = 10; // Posição inicial do helicóptero
-bool helicopterMovingRight = true;      // Direção inicial do helicóptero
-int width = 100, height = 40;
-
-// Variáveis para os mísseis do helicóptero e do depósito
-const int MAX_HELICOPTER_MISSILES = 10;
-std::atomic<int> helicopterMissiles{MAX_HELICOPTER_MISSILES};
-
-const int MAX_DEPOT_MISSILES = 10;
-std::atomic<int> depotMissiles{MAX_DEPOT_MISSILES};
-
-int depositX = 0, depositY = 0; // Coordenadas do depósito
-
-enum class HelicopterState
-{
-    Normal,
-    Reloading
-};
-HelicopterState helicopterState = HelicopterState::Normal;
-std::chrono::time_point<std::chrono::steady_clock> reloadStartTime;
-const auto HELICOPTER_RELOAD_TIME = std::chrono::seconds(1);
+// **Implementações das Funções**
 
 void drawSkyAndGrass(int width, int height)
 {
@@ -178,7 +206,8 @@ void eraseTruck(int x, int y)
 {
     for (int i = 0; i < 5; i++)
     {
-        mvaddstr(y + i, x, std::string(truckWidth, ' ').c_str());
+        if (x >= 0 && x < width)
+            mvaddstr(y + i, x, std::string(30, ' ').c_str());
     }
     refresh();
 }
@@ -240,10 +269,9 @@ void unloadMissilesToDepot(int amount)
     depotNotFull.notify_all();
 }
 
-
-// Modifique a função truckAnimation
 void truckAnimation()
 {
+    int truckWidth = 30; // Largura do caminhão
     int truckX = -truckWidth;
     int truckY = height - 10;
     bool truckMovingRight = true;
@@ -253,10 +281,7 @@ void truckAnimation()
         // Caminhão traz mísseis de tempos em tempos
         std::this_thread::sleep_for(std::chrono::seconds(15)); // Tempo entre viagens do caminhão
 
-        // Caminhão entra na tela movendo para a direita
-        truckMovingRight = true;
-        truckX = -truckWidth;
-
+        // Caminhão entra na tela
         while (truckX < depositX - 5 && running && !gameOver)
         {
             {
@@ -284,15 +309,13 @@ void truckAnimation()
             mvprintw(3, 0, "                                                              ");
         }
 
-        // Caminhão vira para a esquerda e sai do depósito
-        truckMovingRight = false;
-
-        while (truckX > -truckWidth && running && !gameOver)
+        // Caminhão sai do depósito pela direita
+        while (truckX < width + truckWidth && running && !gameOver)
         {
             {
                 std::lock_guard<std::mutex> lock(mtx);
-                eraseTruck(truckX + 1, truckY);
-                truckX--;
+                eraseTruck(truckX, truckY);
+                truckX++;
                 if (truckX >= 0 && truckX < width)
                     drawTruck(truckX, truckY, truckMovingRight);
                 drawDeposit(depositX, depositY);
@@ -303,15 +326,15 @@ void truckAnimation()
         // Limpar qualquer resíduo do caminhão que possa ficar na tela
         {
             std::lock_guard<std::mutex> lock(mtx);
-            eraseTruck(truckX + 1, truckY);
+            eraseTruck(truckX - 1, truckY);
         }
 
-        // Esperar antes de iniciar a próxima viagem
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        // Reiniciar posição do caminhão para próxima viagem
+        truckX = -truckWidth;
     }
 }
 
-bool checkCollisionWithDinoHead(const Missile &missile, const Dino &dino)
+bool checkCollisionWithDinoHead(const Missile &missile, Dino &dino)
 {
     if (!dino.alive)
         return false;
@@ -321,7 +344,17 @@ bool checkCollisionWithDinoHead(const Missile &missile, const Dino &dino)
     int headY = dino.y + 1;
 
     // Verificar colisão com a cabeça
-    return (missile.x == headX && missile.y == headY);
+    if (missile.x == headX && missile.y == headY)
+    {
+        dino.headshotHits++;
+        if (dino.headshotHits >= m)
+        {
+            dino.alive = false;
+            eraseDino(dino);
+        }
+        return true;
+    }
+    return false;
 }
 
 bool checkCollisionWithDinoBody(const Missile &missile, const Dino &dino)
@@ -364,8 +397,6 @@ void missileThread(Missile missile)
             {
                 if (checkCollisionWithDinoHead(missile, dino))
                 {
-                    dino.alive = false;
-                    eraseDino(dino);
                     missile.active = false;
                     break;
                 }
@@ -462,17 +493,59 @@ void spawnDino()
 {
     while (running && !gameOver)
     {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::this_thread::sleep_for(std::chrono::seconds(t)); // Intervalo baseado na dificuldade
         {
             std::lock_guard<std::mutex> lock(mtx);
             if (countAliveDinos() < 5)
             {
                 int randomHeight = height - 8 - (rand() % 5);
-                Dino newDino = {0, randomHeight, true, true};
+                Dino newDino = {0, randomHeight, true, true, 0};
                 dinos.push_back(newDino);
             }
         }
     }
+}
+
+void showDifficultyMenu(int &m, int &n, int &t)
+{
+    clear();
+    mvprintw(0, 0, "Escolha o grau de dificuldade:");
+
+    mvprintw(2, 0, "1. Fácil   (m=1, n=20, t=10)");
+    mvprintw(3, 0, "2. Médio   (m=2, n=15, t=7)");
+    mvprintw(4, 0, "3. Difícil (m=3, n=10, t=5)");
+    mvprintw(6, 0, "Escolha (1/2/3): ");
+
+    int choice = 0;
+    while (choice < '1' || choice > '3')
+    {
+        choice = getch();
+    }
+
+    switch (choice)
+    {
+    case '1':
+        m = 1;
+        n = 20;
+        t = 10;
+        break;
+    case '2':
+        m = 2;
+        n = 15;
+        t = 7;
+        break;
+    case '3':
+        m = 3;
+        n = 10;
+        t = 5;
+        break;
+    }
+
+    clear();
+    mvprintw(0, 0, "Dificuldade selecionada: %s", (choice == '1' ? "Fácil" : (choice == '2' ? "Médio" : "Difícil")));
+    refresh();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    clear();
 }
 
 int main()
@@ -487,6 +560,14 @@ int main()
     init_pair(2, COLOR_GREEN, COLOR_GREEN); // Grama
 
     srand(time(0));
+
+    // Exibir menu de dificuldade
+    showDifficultyMenu(m, n, t);
+
+    // Configurar variáveis globais com base na dificuldade escolhida
+    MAX_HELICOPTER_MISSILES = n;
+    helicopterMissiles.store(MAX_HELICOPTER_MISSILES);
+
     drawSkyAndGrass(width, height);
 
     depositX = width - 20;
@@ -541,7 +622,7 @@ int main()
         case ' ': // Disparar míssil
         {
             std::lock_guard<std::mutex> lock(mtx);
-            if (helicopterMissiles > 0)
+            if (helicopterMissiles.load() > 0)
             {
                 helicopterMissiles--;
                 Missile missile = {helicopterX + (helicopterMovingRight ? 9 : -1), helicopterY, true, helicopterMovingRight};
@@ -587,9 +668,19 @@ int main()
                     std::unique_lock<std::mutex> lock(depotMutex);
 
                     int neededMissiles = MAX_HELICOPTER_MISSILES - helicopterMissiles.load();
-                    int missilesToLoad = std::min(neededMissiles, depotMissiles.load());
+                    int missilesToLoad = std::min(neededMissiles, (int)depotMissiles.load());
                     depotMissiles.fetch_sub(missilesToLoad);
                     helicopterMissiles.fetch_add(missilesToLoad);
+
+                    // Garantir que não exceda o máximo
+                    if (helicopterMissiles.load() > MAX_HELICOPTER_MISSILES)
+                    {
+                        helicopterMissiles.store(MAX_HELICOPTER_MISSILES);
+                    }
+                    if (depotMissiles.load() < 0)
+                    {
+                        depotMissiles.store(0);
+                    }
 
                     helicopterReloading = false;
                     helicopterState = HelicopterState::Normal;
